@@ -1,55 +1,70 @@
-import re
+# tools.py
 
+from typing import Any
 from src.retriever import retrieve
-from openai import OpenAI
-
-client = OpenAI()
-
-
-def summarizer_tool(texts):
-    context = "\n\n".join(texts)
-
-    prompt = f"""
-Summarize the following text:
-
-{context}
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.2
-    )
-
-    return response.choices[0].message.content
+from src.context import ToolContext
+from src.memory_search import search_memory
 
 
-def retrieval_tool(query, model, index, chunks):
+def retrieval_tool(
+    context: ToolContext,
+    query: str,
+    top_k: int = 2,
+) -> dict[str, Any]:
     results = retrieve(
         query=query,
-        model=model,
-        index=index,
-        chunks=chunks,
-        top_k=2
+        model=context.model,
+        index=context.index,
+        chunks=context.chunks,
+        top_k=top_k,
     )
 
-    best_score = results[0]["score"] if results else 0
+    best_score = 0.0
+
+    if results:
+        best_score = max(item["score"] for item in results)
 
     return {
         "results": results,
-        "best_score": best_score
+        "best_score": best_score,
     }
 
 
-def calculator_tool(query):
-    # оставляем только цифры и операторы
-    expression = re.sub(r"[^0-9+\-*/(). ]", "", query)
+def memory_search_tool(
+    context: ToolContext,
+    query: str,
+    top_k: int = 1,
+) -> dict[str, Any]:
+    results = search_memory(
+        query=query,
+        model=context.model,
+        top_k=top_k,
+    )
 
-    try:
-        result = eval(expression)
-        return {"result": result}
+    best_score = max(
+        (item["score"] for item in results),
+        default=0.0,
+    )
 
-    except Exception:
-        return {"error": "invalid expression"}
+    formatted_results = []
+
+    for item in results:
+        memory = item["memory"]
+
+        formatted_results.append({
+            "text": memory.get("summary", ""),
+            "score": item["score"],
+            "source": "memory",
+            "raw_memory": memory,
+        })
+
+    return {
+        "results": formatted_results,
+        "best_score": best_score,
+    }
+
+
+TOOLS = {
+    "retrieval": retrieval_tool,
+    "memory_search": memory_search_tool,
+}
