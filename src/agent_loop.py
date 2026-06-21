@@ -5,6 +5,9 @@ from src.context import ToolContext
 from sentence_transformers import SentenceTransformer
 from src.faiss_index import load_index, load_chunks
 from src.memory import load_memory
+from src.llm_decision import llm_decide_next_action
+from src.decision_context import build_decision_context
+from src.llm_openai import openai_llm
 
 
 @dataclass
@@ -33,51 +36,87 @@ class AgentState:
     final_answer: str | None = None
 
 
+def mock_llm(prompt: str) -> str:
+    if "Last action:\nmemory_search" in prompt:
+        return """
+Thought: Memory search was completed. I can answer now.
+Action: final_answer
+"""
 
-def decide_next_action(state: AgentState) -> dict[str, Any]:
-    if not state.steps:
+    if "Last action:\nretrieval" in prompt:
+        return """
+Thought: Retrieval was already used. Need to search memory.
+Action: memory_search
+"""
+
+    return """
+Thought: Need to search relevant context.
+Action: retrieval
+"""
+
+def build_tool_call(action: str, state: AgentState) -> dict[str, Any] | None:
+    if action == "final_answer":
+        return None
+
+    if action == "retrieval":
         return {
-            "thought": "Need to search relevant context",
-            "action": "retrieval",
-            "tool_call": {
-                "tool_name": "retrieval",
-                "args": {"query": state.query},
-            },
+            "tool_name": "retrieval",
+            "args": {"query": state.query},
         }
 
-    last_step = state.steps[-1]
-
-    if last_step.action == "retrieval":
-        best_score = last_step.observation.get("best_score", 0)
-
-        if best_score >= state.min_retrieval_score:
-            return {
-                "thought": "Retrieval score is high enough. I can answer.",
-                "action": "final_answer",
-                "tool_call": None,
-            }
-
+    if action == "memory_search":
         return {
-            "thought": "Retrieval score is too low. Need memory search.",
-            "action": "memory_search",
-            "tool_call": {
-                "tool_name": "memory_search",
-                "args": {"query": state.query},
-            },
+            "tool_name": "memory_search",
+            "args": {"query": state.query},
         }
+
+    raise ValueError(f"Cannot build tool_call for action: {action}")
+
+
+# def decide_next_action(state: AgentState) -> dict[str, Any]:
+#     if not state.steps:
+#         return {
+#             "thought": "Need to search relevant context",
+#             "action": "retrieval",
+#             "tool_call": {
+#                 "tool_name": "retrieval",
+#                 "args": {"query": state.query},
+#             },
+#         }
+
+#     last_step = state.steps[-1]
+
+#     if last_step.action == "retrieval":
+#         best_score = last_step.observation.get("best_score", 0)
+
+#         if best_score >= state.min_retrieval_score:
+#             return {
+#                 "thought": "Retrieval score is high enough. I can answer.",
+#                 "action": "final_answer",
+#                 "tool_call": None,
+#             }
+
+#         return {
+#             "thought": "Retrieval score is too low. Need memory search.",
+#             "action": "memory_search",
+#             "tool_call": {
+#                 "tool_name": "memory_search",
+#                 "args": {"query": state.query},
+#             },
+#         }
     
-    if last_step.action == "memory_search":
-        return {
-            "thought": "Memory search completed. I can answer with available context.",
-            "action": "final_answer",
-            "tool_call": None,
-        }
+#     if last_step.action == "memory_search":
+#         return {
+#             "thought": "Memory search completed. I can answer with available context.",
+#             "action": "final_answer",
+#             "tool_call": None,
+#         }
     
-    return {
-    "thought": "No useful next action. Stop the loop.",
-    "action": "final_answer",
-    "tool_call": None,
-    }
+#     return {
+#     "thought": "No useful next action. Stop the loop.",
+#     "action": "final_answer",
+#     "tool_call": None,
+#     }
 
 
 
@@ -126,21 +165,35 @@ def synthesize_response(state: AgentState) -> str:
     
 
 
-def run_agent_loop(query: str, context: ToolContext, max_steps: int = 5) -> AgentState:
+def run_agent_loop(query: str, context: ToolContext, llm, max_steps: int = 5) -> AgentState:
     state = AgentState(query=query, max_steps=max_steps)
 
     while not state.is_done and state.step_count < state.max_steps:
         state.step_count += 1
 
-        decision = decide_next_action(state)
+        decision_context = build_decision_context(state)
 
-        observation = execute_tool(decision.get("tool_call"), context=context,)
+        decision = llm_decide_next_action(
+            llm=llm,
+            available_actions=list(TOOLS.keys()) + ["final_answer"],
+            **decision_context,
+        )
+
+        tool_call = build_tool_call(
+            action=decision["action"],
+            state=state,
+        )
+
+        observation = execute_tool(
+            tool_call,
+            context=context,
+        )
 
         step = AgentStep(
             step_id=state.step_count,
             thought=decision.get("thought"),
             action=decision.get("action"),
-            tool_call=decision.get("tool_call"),
+            tool_call=tool_call,
             observation=observation,
         )
 
@@ -171,7 +224,11 @@ if __name__ == "__main__":
         index=index,
         chunks=chunks,
     )
-    state = run_agent_loop("What is Feature Registry?", context=context,)
+    state = run_agent_loop(
+        "What is Feature Registry?",
+        context=context,
+        llm=openai_llm,
+    )
 
     print("Final answer:", state.final_answer)
     print("Stop reason:", state.stop_reason)
