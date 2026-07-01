@@ -8,6 +8,11 @@ from src.memory import load_memory
 from src.llm_decision import llm_decide_next_action
 from src.decision_context import build_decision_context
 from src.llm_openai import openai_llm
+from src.summary_context import build_summary_context
+from src.progress import calculate_progress
+from src.state_manager import update_no_progress_count, update_blocked_actions, get_available_actions
+
+
 
 
 @dataclass
@@ -17,8 +22,14 @@ class AgentStep:
     action: str | None = None
     tool_call: dict[str, Any] | None = None
     observation: Any = None
+    similarity_to_previous: float | None = None
+    is_new_information: bool | None = None
+    no_progress_count: int = 0
     status: str = "success"
     error: str | None = None
+    blocked_actions: set[str] | None = None
+    available_actions: list[str] = field(default_factory=list)
+
 
 
 @dataclass
@@ -27,11 +38,16 @@ class AgentState:
     steps: list[AgentStep] = field(default_factory=list)
 
     step_count: int = 0
-    max_steps: int = 5
+    max_steps: int = 20
     min_retrieval_score: float = 0.75
 
     is_done: bool = False
     stop_reason: str | None = None
+
+    
+    no_progress_counts: dict[str, int] = field(default_factory=dict)
+    no_progress_limit: int = 3
+    blocked_actions: set[str] = field(default_factory=set)
 
     final_answer: str | None = None
 
@@ -165,7 +181,7 @@ def synthesize_response(state: AgentState) -> str:
     
 
 
-def run_agent_loop(query: str, context: ToolContext, llm, max_steps: int = 5) -> AgentState:
+def run_agent_loop(query: str, context: ToolContext, llm, max_steps: int = 20) -> AgentState:
     state = AgentState(query=query, max_steps=max_steps)
 
     while not state.is_done and state.step_count < state.max_steps:
@@ -173,11 +189,14 @@ def run_agent_loop(query: str, context: ToolContext, llm, max_steps: int = 5) ->
 
         decision_context = build_decision_context(state)
 
+        available_actions = get_available_actions(state)
+
         decision = llm_decide_next_action(
             llm=llm,
-            available_actions=list(TOOLS.keys()) + ["final_answer"],
+            available_actions = available_actions,
             **decision_context,
         )
+        action = decision.get("action")
 
         tool_call = build_tool_call(
             action=decision["action"],
@@ -189,15 +208,45 @@ def run_agent_loop(query: str, context: ToolContext, llm, max_steps: int = 5) ->
             context=context,
         )
 
+        summary_context = build_summary_context(
+            state=state,
+            current_action=decision.get("action"),
+            current_observation=observation,
+        )
+
+        progress = calculate_progress(
+            model=context.model,
+            previous_summary=summary_context["previous_summary"],
+            current_summary=summary_context["current_summary"],
+        )
+
+        update_no_progress_count(
+            state=state,
+            action=action,
+            progress=progress,
+        )
+
+        update_blocked_actions(
+            state=state,
+            action=action,
+        )
+
         step = AgentStep(
             step_id=state.step_count,
             thought=decision.get("thought"),
-            action=decision.get("action"),
+            action=action,
             tool_call=tool_call,
             observation=observation,
+            similarity_to_previous=progress["similarity_to_previous"],
+            is_new_information=progress["is_new_information"],
+            no_progress_count=state.no_progress_counts.get(action, 0),
+            blocked_actions=set(state.blocked_actions),
+            available_actions=available_actions.copy(),
         )
 
         state.steps.append(step)
+
+        
 
         if decision.get("action") == "final_answer":
             state.is_done = True
@@ -225,7 +274,7 @@ if __name__ == "__main__":
         chunks=chunks,
     )
     state = run_agent_loop(
-        "What is Feature Registry?",
+        "What is Feature Stop?",
         context=context,
         llm=openai_llm,
     )
@@ -236,5 +285,13 @@ if __name__ == "__main__":
 
     for step in state.steps:
         print(step)
+        print("-" * 60)
+        print(f"Step {step.step_id}")
+        print(f"Action: {step.action}")
+        print(f"Available: {step.available_actions}")
+        print(f"Blocked: {step.blocked_actions}")
+        print(f"No progress: {step.no_progress_count}")
+        print("-" * 60)
+        
 
     #----------------------------------------------------python -m src.agent_loop

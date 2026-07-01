@@ -19,12 +19,21 @@ def retrieval_tool(
         top_k=top_k,
     )
 
+    
     best_score = 0.0
+    summary = ""
 
     if results:
-        best_score = max(item["score"] for item in results)
+        best_result = max(
+            results,
+            key=lambda item: item["score"],
+        )
+
+        best_score = best_result["score"]
+        summary = best_result["text"]
 
     return {
+        "summary": summary,
         "results": results,
         "best_score": best_score,
     }
@@ -41,11 +50,6 @@ def memory_search_tool(
         top_k=top_k,
     )
 
-    best_score = max(
-        (item["score"] for item in results),
-        default=0.0,
-    )
-
     formatted_results = []
 
     for item in results:
@@ -58,7 +62,15 @@ def memory_search_tool(
             "raw_memory": memory,
         })
 
+    summary = ""
+    best_score = 0.0
+
+    if formatted_results:
+        summary = formatted_results[0]["text"]
+        best_score = formatted_results[0]["score"]
+
     return {
+        "summary": summary,
         "results": formatted_results,
         "best_score": best_score,
     }
